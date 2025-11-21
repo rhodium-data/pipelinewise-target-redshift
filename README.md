@@ -15,14 +15,6 @@ We thank all in the open-source community, that over the past 6 years, have help
 
 This is a [PipelineWise](https://transferwise.github.io/pipelinewise) compatible target connector.
 
-## Recent Updates
-
-### Version 1.6.0
-
-- **Redshift SUPER Data Type Support**: Added full support for Redshift SUPER data type. The target now automatically detects SUPER type in both the `type` and `format` fields and handles JSON data natively without requiring parse_json transformations.
-- **Python 3.10 Compatibility**: Upgraded all dependencies to ensure full compatibility with Python 3.10.
-- **Version Flag**: Added `--version` flag to display the current version of target-redshift.
-- **Enhanced Testing**: Improved and expanded unit test coverage for better reliability.
 
 ## How to use it
 

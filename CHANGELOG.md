@@ -1,3 +1,15 @@
+1.6.1 (2025-11-21)
+-------------------
+
+- Add support for Redshift SUPER data type with automatic detection and native JSON handling
+- Add `--version` flag to display current version
+- Upgrade all dependencies for full Python 3.10 compatibility
+- Add comprehensive Makefile for simplified development workflows (test, lint, install)
+- Add extensive test coverage documentation with detailed descriptions
+- Add platform-specific installation instructions (Zsh, Bash, Fish, Windows)
+- Improve unit and integration test coverage
+- Add detailed integration test configuration guide with environment variables and permissions
+
 1.6.0 (2020-08-03)
 -------------------
 

@@ -19,7 +19,7 @@ from itertools import islice
 
 from target_redshift.db_sync import DbSync
 
-__version__ = '1.6.0'
+__version__ = '1.6.1'
 
 LOGGER = get_logger('target_redshift')
 
