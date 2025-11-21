@@ -1,4 +1,5 @@
 import pytest
+import mock
 import target_redshift
 
 
@@ -94,6 +95,20 @@ class TestTargetRedshift(object):
         assert mapper(json_super_list)   == 'super'
         assert mapper(json_super_null)   == 'super'
         assert mapper(json_obj_super)    == 'super'
+
+        # Test with maxLength that exceeds DEFAULT_VARCHAR_LENGTH
+        json_str_long = {"type": ["string"], "maxLength": 50000}
+        assert mapper(json_str_long) == 'character varying(65535)'
+
+        # Test with_length=False parameter
+        json_str_no_length = {"type": ["string"]}
+        assert mapper(json_str_no_length, with_length=False) == 'character varying'
+
+        json_obj_no_length = {"type": ["object"]}
+        assert mapper(json_obj_no_length, with_length=False) == 'character varying'
+
+        json_time_no_length = {"type": ["string"], "format": "time"}
+        assert mapper(json_time_no_length, with_length=False) == 'character varying'
 
 
     def test_column_trans_mapping(self):
