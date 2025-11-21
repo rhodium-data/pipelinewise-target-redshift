@@ -1,0 +1,21 @@
+# Lightweight PostgreSQL for mock integration testing
+# This simulates Redshift behavior for local testing without AWS infrastructure
+FROM postgres:14-alpine
+
+# Install necessary extensions for Redshift-like behavior
+RUN apk add --no-cache postgresql-contrib
+
+# Set default database configuration
+ENV POSTGRES_USER=test_user
+ENV POSTGRES_PASSWORD=test_password
+ENV POSTGRES_DB=test_db
+
+# Copy initialization scripts
+COPY tests/mock_integration/init-db.sql /docker-entrypoint-initdb.d/
+
+# Expose PostgreSQL port
+EXPOSE 5432
+
+# Health check
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+  CMD pg_isready -U $POSTGRES_USER -d $POSTGRES_DB || exit 1

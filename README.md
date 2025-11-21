@@ -191,7 +191,85 @@ make test-unit
 coverage run -m pytest -vv --disable-pytest-warnings tests/unit && coverage report
 ```
 
-#### Integration Tests
+#### Mock Integration Tests (Docker PostgreSQL)
+
+Mock integration tests provide a fast, local alternative to full integration testing. They use PostgreSQL running in Docker to simulate Redshift behavior without requiring AWS infrastructure.
+
+**Benefits:**
+- **No AWS Required**: Runs entirely locally without Redshift or S3
+- **Fast Feedback**: Quick setup and execution for rapid development
+- **Cost-Free**: No AWS charges for testing
+- **CI/CD Friendly**: Easy to integrate into automated pipelines
+- **Isolated**: Each test run uses a fresh database
+
+**What Mock Integration Tests Cover:**
+
+Mock integration tests verify core functionality that doesn't depend on Redshift-specific features:
+- Basic data loading and COPY operations (using local files instead of S3)
+- Table creation and schema management
+- Data type conversions and transformations
+- Metadata column handling
+- Primary key operations and updates
+- Unicode character support
+- Simple schema evolution
+
+**Limitations:**
+
+Mock tests cannot verify:
+- Redshift-specific features (SUPER type, DISTKEY, SORTKEY)
+- S3 integration and authentication
+- Redshift performance optimizations
+- AWS IAM role-based authentication
+- Redshift-specific SQL syntax variations
+
+**Running Mock Integration Tests:**
+
+```bash
+# Using Makefile (recommended - handles Docker automatically)
+make test-mock-integration
+
+# Or manually:
+# 1. Start PostgreSQL container
+make docker-up
+
+# 2. Run tests
+pytest -vv tests/mock_integration
+
+# 3. Stop container when done
+make docker-down
+```
+
+**Docker Commands:**
+
+```bash
+# Start PostgreSQL container
+make docker-up
+
+# Stop and remove container
+make docker-down
+
+# View container logs
+make docker-logs
+
+# Clean up all Docker resources
+make clean-docker
+```
+
+**Configuration:**
+
+Mock tests use environment variables with sensible defaults:
+```bash
+export MOCK_TARGET_HOST=localhost
+export MOCK_TARGET_PORT=5439  # Matches Redshift default
+export MOCK_TARGET_USER=test_user
+export MOCK_TARGET_PASSWORD=test_password
+export MOCK_TARGET_DBNAME=test_db
+export MOCK_TARGET_SCHEMA=test_target_schema
+```
+
+The Docker setup is configured in `docker-compose.yml` and uses PostgreSQL 14 Alpine for a lightweight footprint.
+
+#### Integration Tests (Real Redshift)
 
 Integration tests validate end-to-end functionality by connecting to a real Redshift cluster and S3 bucket. These tests verify actual data loading, transformations, and edge cases in a live environment.
 

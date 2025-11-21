@@ -26,14 +26,18 @@ def validate_config(config):
         'port',
         'user',
         'password',
-        'dbname',
-        's3_bucket'
+        'dbname'
     ]
 
     # Check if mandatory keys exist
     for k in required_config_keys:
         if not config.get(k, None):
             errors.append("Required key is missing from config: [{}]".format(k))
+
+    # Check for S3 config or local copy mode
+    use_local_copy = config.get('use_local_copy', False)
+    if not use_local_copy and not config.get('s3_bucket', None):
+        errors.append("Either 's3_bucket' or 'use_local_copy' must be configured.")
 
     # Check target schema config
     config_default_target_schema = config.get('default_target_schema', None)
@@ -239,29 +243,38 @@ class DbSync:
             self.logger.error("Invalid configuration:\n   * {}".format('\n   * '.join(config_errors)))
             sys.exit(1)
 
-        aws_profile = self.connection_config.get('aws_profile') or os.environ.get('AWS_PROFILE')
-        aws_access_key_id = self.connection_config.get('aws_access_key_id') or os.environ.get('AWS_ACCESS_KEY_ID')
-        aws_secret_access_key = self.connection_config.get('aws_secret_access_key') or os.environ.get('AWS_SECRET_ACCESS_KEY')
-        aws_session_token = self.connection_config.get('aws_session_token') or os.environ.get('AWS_SESSION_TOKEN')
+        # Check if using local copy mode (for testing with Docker PostgreSQL)
+        self.use_local_copy = self.connection_config.get('use_local_copy', False)
 
-        # Init S3 client
-        # Conditionally pass keys as this seems to affect whether instance credentials are correctly loaded if the keys are None
-        if aws_access_key_id and aws_secret_access_key:
-            aws_session = boto3.session.Session(
-                aws_access_key_id=aws_access_key_id,
-                aws_secret_access_key=aws_secret_access_key,
-                aws_session_token=aws_session_token
-            )
-            credentials = aws_session.get_credentials().get_frozen_credentials()
+        # Init S3 client only if not using local copy mode
+        if not self.use_local_copy:
+            aws_profile = self.connection_config.get('aws_profile') or os.environ.get('AWS_PROFILE')
+            aws_access_key_id = self.connection_config.get('aws_access_key_id') or os.environ.get('AWS_ACCESS_KEY_ID')
+            aws_secret_access_key = self.connection_config.get('aws_secret_access_key') or os.environ.get('AWS_SECRET_ACCESS_KEY')
+            aws_session_token = self.connection_config.get('aws_session_token') or os.environ.get('AWS_SESSION_TOKEN')
 
-            # Explicitly set credentials to those fetched from Boto so we can re-use them in COPY SQL if necessary
-            self.connection_config['aws_access_key_id'] = credentials.access_key
-            self.connection_config['aws_secret_access_key'] = credentials.secret_key
-            self.connection_config['aws_session_token'] = credentials.token
+            # Init S3 client
+            # Conditionally pass keys as this seems to affect whether instance credentials are correctly loaded if the keys are None
+            if aws_access_key_id and aws_secret_access_key:
+                aws_session = boto3.session.Session(
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key,
+                    aws_session_token=aws_session_token
+                )
+                credentials = aws_session.get_credentials().get_frozen_credentials()
+
+                # Explicitly set credentials to those fetched from Boto so we can re-use them in COPY SQL if necessary
+                self.connection_config['aws_access_key_id'] = credentials.access_key
+                self.connection_config['aws_secret_access_key'] = credentials.secret_key
+                self.connection_config['aws_session_token'] = credentials.token
+            else:
+                aws_session = boto3.session.Session(profile_name=aws_profile)
+
+            self.s3 = aws_session.client('s3')
         else:
-            aws_session = boto3.session.Session(profile_name=aws_profile)
+            self.s3 = None
+            self.logger.info("Using local file copy mode - S3 client disabled")
 
-        self.s3 = aws_session.client('s3')
         self.skip_updates = self.connection_config.get('skip_updates', False)
         self.primary_key_required = self.connection_config.get('primary_key_required', True)
 
@@ -386,6 +399,11 @@ class DbSync:
         )
 
     def put_to_s3(self, file, stream, count, suffix = ""):
+        # If using local copy mode, just return the local file path
+        if self.use_local_copy:
+            self.logger.info("Using local file for COPY: {}".format(file))
+            return file
+
         self.logger.info("Uploading {} rows to S3".format(count))
 
         # Generating key in S3 bucket
@@ -402,6 +420,11 @@ class DbSync:
         return s3_key
 
     def delete_from_s3(self, s3_key):
+        # If using local copy mode, file is already removed by the caller
+        if self.use_local_copy:
+            self.logger.info("Local file mode - file already removed: {}".format(s3_key))
+            return
+
         self.logger.info("Deleting {} from S3".format(s3_key))
         bucket = self.connection_config['s3_bucket']
         self.s3.delete_object(Bucket=bucket, Key=s3_key)
@@ -433,49 +456,84 @@ class DbSync:
                 cur.execute(self.drop_table_query(is_stage=True))
                 cur.execute(self.create_table_query(is_stage=True))
 
-                # Step 2: Generate copy credentials - prefer role if provided, otherwise use access and secret keys
-                copy_credentials = """
-                    iam_role '{aws_role_arn}'
-                """.format(aws_role_arn=self.connection_config['aws_redshift_copy_role_arn']) if self.connection_config.get("aws_redshift_copy_role_arn") else """
-                    ACCESS_KEY_ID '{aws_access_key_id}'
-                    SECRET_ACCESS_KEY '{aws_secret_access_key}'
-                    {aws_session_token}
-                """.format(
-                    aws_access_key_id=self.connection_config['aws_access_key_id'],
-                    aws_secret_access_key=self.connection_config['aws_secret_access_key'],
-                    aws_session_token="SESSION_TOKEN '{}'".format(self.connection_config['aws_session_token']) if self.connection_config.get('aws_session_token') else '',
-                )
+                # Step 2: Generate COPY command based on mode (S3 or local file)
+                if self.use_local_copy:
+                    # PostgreSQL COPY FROM STDIN - reads data from client
+                    # This is necessary because PostgreSQL server can't access files on the client machine
+                    # Note: Using backslash as ESCAPE because CSV is generated with json.dumps() which uses backslash escaping
+                    copy_sql = """COPY {table} ({columns}) FROM STDIN
+                        WITH (FORMAT csv, DELIMITER ',', QUOTE '"', ESCAPE '\\', NULL '', HEADER false)
+                    """.format(
+                        table=stage_table,
+                        columns=', '.join([c['name'] for c in columns_with_trans])
+                    )
+                    self.logger.debug("Running query: {}".format(copy_sql))
 
-                # Step 3: Generate copy options - Override defaults from config.json if defined
-                copy_options = self.connection_config.get('copy_options',"""
-                    EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
-                    TIMEFORMAT 'auto'
-                    COMPUPDATE OFF STATUPDATE OFF
-                """)
+                    # Find all sliced files matching the pattern (e.g., file.csv.1, file.csv.2, etc.)
+                    # s3_key in local mode is the base path without the slice number
+                    import glob
+                    pattern = s3_key + '.*'
+                    matching_files = glob.glob(pattern)
 
-                if compression == "gzip":
-                    compression_option = " GZIP"
-                elif compression == "bzip2":
-                    compression_option = " BZIP2"
+                    if not matching_files:
+                        # Fallback: try the exact path (for non-sliced files)
+                        matching_files = [s3_key] if os.path.exists(s3_key) else []
+
+                    if not matching_files:
+                        raise Exception(f"No files found matching pattern: {pattern}")
+
+                    self.logger.debug(f"Loading {len(matching_files)} file(s) from local filesystem")
+
+                    # Load each sliced file
+                    for file_path in sorted(matching_files):
+                        self.logger.debug(f"Loading file: {file_path}")
+                        with open(file_path, 'r') as f:
+                            cur.copy_expert(copy_sql, f)
                 else:
-                    compression_option = ""
+                    # Redshift S3 COPY command
+                    # Step 2a: Generate copy credentials - prefer role if provided, otherwise use access and secret keys
+                    copy_credentials = """
+                        iam_role '{aws_role_arn}'
+                    """.format(aws_role_arn=self.connection_config['aws_redshift_copy_role_arn']) if self.connection_config.get("aws_redshift_copy_role_arn") else """
+                        ACCESS_KEY_ID '{aws_access_key_id}'
+                        SECRET_ACCESS_KEY '{aws_secret_access_key}'
+                        {aws_session_token}
+                    """.format(
+                        aws_access_key_id=self.connection_config['aws_access_key_id'],
+                        aws_secret_access_key=self.connection_config['aws_secret_access_key'],
+                        aws_session_token="SESSION_TOKEN '{}'".format(self.connection_config['aws_session_token']) if self.connection_config.get('aws_session_token') else '',
+                    )
 
-                # Step 4: Load into the stage table
-                copy_sql = """COPY {table} ({columns}) FROM 's3://{s3_bucket}/{s3_key}'
-                    {copy_credentials}
-                    {copy_options}
-                    DELIMITER ',' REMOVEQUOTES ESCAPE{compression_option}
-                """.format(
-                    table=stage_table,
-                    columns=', '.join([c['name'] for c in columns_with_trans]),
-                    s3_bucket=self.connection_config['s3_bucket'],
-                    s3_key=s3_key,
-                    copy_credentials=copy_credentials,
-                    copy_options=copy_options,
-                    compression_option=compression_option
-                )
-                self.logger.debug("Running query: {}".format(copy_sql))
-                cur.execute(copy_sql)
+                    # Step 3: Generate copy options - Override defaults from config.json if defined
+                    copy_options = self.connection_config.get('copy_options',"""
+                        EMPTYASNULL BLANKSASNULL TRIMBLANKS TRUNCATECOLUMNS
+                        TIMEFORMAT 'auto'
+                        COMPUPDATE OFF STATUPDATE OFF
+                    """)
+
+                    if compression == "gzip":
+                        compression_option = " GZIP"
+                    elif compression == "bzip2":
+                        compression_option = " BZIP2"
+                    else:
+                        compression_option = ""
+
+                    # Step 4: Load into the stage table from S3
+                    copy_sql = """COPY {table} ({columns}) FROM 's3://{s3_bucket}/{s3_key}'
+                        {copy_credentials}
+                        {copy_options}
+                        DELIMITER ',' REMOVEQUOTES ESCAPE{compression_option}
+                    """.format(
+                        table=stage_table,
+                        columns=', '.join([c['name'] for c in columns_with_trans]),
+                        s3_bucket=self.connection_config['s3_bucket'],
+                        s3_key=s3_key,
+                        copy_credentials=copy_credentials,
+                        copy_options=copy_options,
+                        compression_option=compression_option
+                    )
+                    self.logger.debug("Running query: {}".format(copy_sql))
+                    cur.execute(copy_sql)
 
                 # Step 5/a: Insert or Update if primary key defined
                 #           Do UPDATE first and second INSERT to calculate
